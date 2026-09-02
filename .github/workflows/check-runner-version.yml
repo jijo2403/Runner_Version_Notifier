@@ -1,0 +1,31 @@
+name: Check Runner Version
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract current version from Dockerfile
+        id: current
+        run: |
+          VERSION=$(grep -oP 'ARG RUNNER_VERSION="\K[^"]+' Dockerfile)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get latest released version
+        id: latest
+        run: |
+          LATEST=$(curl -sL https://api.github.com/repos/actions/runner/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+          echo "version=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Notify Teams if outdated
+        if: steps.current.outputs.version != steps.latest.outputs.version
+        run: |
+          curl -H "Content-Type: application/json" -d '{
+            "text": "🔔 **Runner agent update available**\n\nCurrent version in Dockerfile: `${{ steps.current.outputs.version }}`\nLatest available version: `${{ steps.latest.outputs.version }}`\n\n[View release notes](https://github.com/actions/runner/releases/tag/v${{ steps.latest.outputs.version }})"
+          }' "${{ secrets.TEAMS_WEBHOOK_URL }}"
