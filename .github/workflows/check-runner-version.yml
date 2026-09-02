@@ -1,64 +1,244 @@
-name: Check Runner Version
+name: Check Runner Version and Deprecation
 
 on:
   workflow_dispatch:
-
 jobs:
-  check-version:
+  check-runner:
     runs-on: ubuntu-latest
 
     steps:
 
+      # ==========================================================
+      # 1. Checkout repository
+      # ==========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Extract current version from Dockerfile
+
+      # ==========================================================
+      # 2. Get current runner version from Dockerfile
+      # ==========================================================
+      - name: Get current runner version
         id: current
         run: |
           VERSION=$(grep -oP 'ARG RUNNER_VERSION="\K[^"]+' Dockerfile)
 
-          echo "Current version: $VERSION"
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: RUNNER_VERSION not found in Dockerfile."
+            exit 1
+          fi
+
+          echo "Current Runner Version: $VERSION"
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Get latest released version
+
+      # ==========================================================
+      # 3. Get latest available runner release
+      # ==========================================================
+      - name: Get latest runner version
         id: latest
         run: |
-          LATEST=$(curl -sL \
+          LATEST=$(curl -sS \
+            -H "Accept: application/vnd.github+json" \
             https://api.github.com/repos/actions/runner/releases/latest \
             | jq -r '.tag_name' \
             | sed 's/^v//')
 
-          echo "Latest version: $LATEST"
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            echo "ERROR: Could not determine latest runner version."
+            exit 1
+          fi
+
+          echo "Latest Runner Version: $LATEST"
+
           echo "version=$LATEST" >> "$GITHUB_OUTPUT"
 
-      - name: Compare versions and notify
+
+      # ==========================================================
+      # 4. Compare current version with latest version
+      # ==========================================================
+      - name: Compare runner versions
+        id: comparison
         run: |
           CURRENT="${{ steps.current.outputs.version }}"
           LATEST="${{ steps.latest.outputs.version }}"
 
-          echo "Current version: $CURRENT"
-          echo "Latest version: $LATEST"
+          echo "Current Version: $CURRENT"
+          echo "Latest Version: $LATEST"
 
-          # If versions are the same
           if [ "$CURRENT" = "$LATEST" ]; then
-            echo "Versions match — nothing to notify."
+            echo "status=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "Runner is already on the latest release."
             exit 0
           fi
 
-          # Check whether current version is newer than latest
           OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n1)
 
-          if [ "$OLDEST" != "$CURRENT" ]; then
-            echo "Current version is newer than latest."
-            echo "No notification required."
+          if [ "$OLDEST" = "$CURRENT" ]; then
+            echo "status=update-available" >> "$GITHUB_OUTPUT"
+            echo "A newer runner version is available."
+          else
+            echo "status=current-newer" >> "$GITHUB_OUTPUT"
+            echo "Current runner version is newer than the latest release."
+          fi
+
+
+      # ==========================================================
+      # 5. Get actual deprecation date for current version
+      # ==========================================================
+      - name: Get runner deprecation date
+        id: deprecation
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_RUNNER_TOKEN }}
+          ORG_NAME: ${{ github.repository_owner }}
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+        run: |
+
+          echo "Checking deprecation schedule..."
+          echo "Organization: $ORG_NAME"
+          echo "Runner Version: $CURRENT_VERSION"
+
+          RESPONSE=$(curl -sS \
+            -w "\nHTTP_STATUS:%{http_code}" \
+            -L \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/orgs/${ORG_NAME}/actions/runners/deprecations/${CURRENT_VERSION}")
+
+          HTTP_STATUS=$(echo "$RESPONSE" \
+            | grep "HTTP_STATUS:" \
+            | cut -d: -f2)
+
+          JSON=$(echo "$RESPONSE" \
+            | sed '/HTTP_STATUS:/d')
+
+          echo "GitHub API HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "ERROR: Unable to retrieve deprecation information."
+            echo "$JSON"
+            exit 1
+          fi
+
+          DEPRECATION_DATE=$(echo "$JSON" \
+            | jq -r '.runtime_deprecates_at')
+
+          if [ "$DEPRECATION_DATE" = "null" ] || [ -z "$DEPRECATION_DATE" ]; then
+            echo "No runtime deprecation date returned."
+            echo "has_date=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "Runner version update available."
-          echo "Current version: $CURRENT"
-          echo "Latest version: $LATEST"
+          echo "Runtime Deprecation Date: $DEPRECATION_DATE"
 
-          echo "Sending Teams notification..."
+          echo "has_date=true" >> "$GITHUB_OUTPUT"
+          echo "deprecation_date=$DEPRECATION_DATE" >> "$GITHUB_OUTPUT"
+
+
+      # ==========================================================
+      # 6. Calculate days remaining until deprecation
+      # ==========================================================
+      - name: Calculate deprecation status
+        id: calculate
+        if: steps.deprecation.outputs.has_date == 'true'
+        env:
+          DEPRECATION_DATE: ${{ steps.deprecation.outputs.deprecation_date }}
+        run: |
+
+          TODAY=$(date -u +%s)
+          DEPRECATION=$(date -u -d "$DEPRECATION_DATE" +%s)
+
+          DIFFERENCE=$((DEPRECATION - TODAY))
+
+          DAYS_REMAINING=$((DIFFERENCE / 86400))
+
+          echo "Today: $(date -u)"
+          echo "Deprecation Date: $DEPRECATION_DATE"
+          echo "Days Remaining: $DAYS_REMAINING"
+
+          echo "days_remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
+
+
+      # ==========================================================
+      # 7. Display complete status
+      # ==========================================================
+      - name: Display runner status
+        run: |
+
+          echo "=========================================="
+          echo "       GitHub Runner Status"
+          echo "=========================================="
+
+          echo "Current Version : ${{ steps.current.outputs.version }}"
+          echo "Latest Version  : ${{ steps.latest.outputs.version }}"
+
+          if [ "${{ steps.deprecation.outputs.has_date }}" = "true" ]; then
+            echo "Deprecation Date : ${{ steps.deprecation.outputs.deprecation_date }}"
+            echo "Days Remaining   : ${{ steps.calculate.outputs.days_remaining }}"
+          else
+            echo "Deprecation Date : Not available"
+          fi
+
+          echo "=========================================="
+
+
+      # ==========================================================
+      # 8. Send Teams notification
+      #
+      # Notification is sent when:
+      #
+      # A. New version is available AND
+      #    current version is within 30 days of deprecation
+      #
+      # OR
+      #
+      # B. Current version is already deprecated
+      #
+      # OR
+      #
+      # C. Current version has 30 days or less remaining
+      # ==========================================================
+      - name: Send Teams notification
+        if: |
+          steps.deprecation.outputs.has_date == 'true' &&
+          (
+            steps.calculate.outputs.days_remaining <= 30 ||
+            steps.comparison.outputs.status == 'update-available'
+          )
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          CURRENT_VERSION: ${{ steps.current.outputs.version }}
+          LATEST_VERSION: ${{ steps.latest.outputs.version }}
+          DEPRECATION_DATE: ${{ steps.deprecation.outputs.deprecation_date }}
+          DAYS_REMAINING: ${{ steps.calculate.outputs.days_remaining }}
+          UPDATE_STATUS: ${{ steps.comparison.outputs.status }}
+        run: |
+
+          if [ "$DAYS_REMAINING" -lt 0 ]; then
+            TITLE="🚨 GitHub Actions Runner Deprecated"
+            MESSAGE="The current runner version has passed its runtime deprecation date."
+
+          elif [ "$DAYS_REMAINING" -eq 0 ]; then
+            TITLE="🚨 GitHub Actions Runner Deprecation Today"
+            MESSAGE="The current runner version reaches runtime deprecation today."
+
+          elif [ "$DAYS_REMAINING" -le 7 ]; then
+            TITLE="🚨 GitHub Actions Runner Deprecation Warning"
+            MESSAGE="The current runner version will reach runtime deprecation within 7 days."
+
+          elif [ "$DAYS_REMAINING" -le 30 ]; then
+            TITLE="⚠️ GitHub Actions Runner Deprecation Warning"
+            MESSAGE="The current runner version is within 30 days of runtime deprecation."
+
+          else
+            TITLE="🔔 GitHub Actions Runner Update Available"
+            MESSAGE="A newer GitHub Actions Runner version is available."
+          fi
+
+          echo "$TITLE"
+          echo "$MESSAGE"
 
           RESPONSE=$(curl -sS -X POST \
             -H "Content-Type: application/json" \
@@ -75,13 +255,13 @@ jobs:
                     \"body\": [
                       {
                         \"type\": \"TextBlock\",
-                        \"text\": \"🔔 Runner Agent Update Available\",
+                        \"text\": \"$TITLE\",
                         \"weight\": \"Bolder\",
                         \"size\": \"Medium\"
                       },
                       {
                         \"type\": \"TextBlock\",
-                        \"text\": \"A newer GitHub Actions Runner version is available.\",
+                        \"text\": \"$MESSAGE\",
                         \"wrap\": true
                       },
                       {
@@ -89,13 +269,26 @@ jobs:
                         \"facts\": [
                           {
                             \"title\": \"Current Version:\",
-                            \"value\": \"$CURRENT\"
+                            \"value\": \"$CURRENT_VERSION\"
                           },
                           {
                             \"title\": \"Latest Version:\",
-                            \"value\": \"$LATEST\"
+                            \"value\": \"$LATEST_VERSION\"
+                          },
+                          {
+                            \"title\": \"Deprecation Date:\",
+                            \"value\": \"$DEPRECATION_DATE\"
+                          },
+                          {
+                            \"title\": \"Days Remaining:\",
+                            \"value\": \"$DAYS_REMAINING\"
                           }
                         ]
+                      },
+                      {
+                        \"type\": \"TextBlock\",
+                        \"text\": \"Please update the runner version in the Dockerfile and rebuild the runner image.\",
+                        \"wrap\": true
                       }
                     ]
                   }
@@ -103,7 +296,7 @@ jobs:
               ]
             }" \
             -w "\nHTTP_STATUS:%{http_code}" \
-            "${{ secrets.TEAMS_WEBHOOK_URL }}")
+            "$TEAMS_WEBHOOK_URL")
 
           echo "Teams response:"
           echo "$RESPONSE"
