@@ -8,21 +8,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout repository
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Extract current runner version from Dockerfile
       - name: Extract current version from Dockerfile
         id: current
         run: |
           VERSION=$(grep -oP 'ARG RUNNER_VERSION="\K[^"]+' Dockerfile)
 
           echo "Current version: $VERSION"
-
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # Get latest GitHub Actions Runner version
       - name: Get latest released version
         id: latest
         run: |
@@ -32,10 +29,8 @@ jobs:
             | sed 's/^v//')
 
           echo "Latest version: $LATEST"
-
           echo "version=$LATEST" >> "$GITHUB_OUTPUT"
 
-      # Compare versions
       - name: Compare versions and notify
         run: |
           CURRENT="${{ steps.current.outputs.version }}"
@@ -44,7 +39,7 @@ jobs:
           echo "Current version: $CURRENT"
           echo "Latest version: $LATEST"
 
-          # Versions are the same
+          # If versions are the same
           if [ "$CURRENT" = "$LATEST" ]; then
             echo "Versions match — nothing to notify."
             exit 0
@@ -63,13 +58,49 @@ jobs:
           echo "Current version: $CURRENT"
           echo "Latest version: $LATEST"
 
-          # Send notification to Microsoft Teams
           echo "Sending Teams notification..."
 
           RESPONSE=$(curl -sS -X POST \
             -H "Content-Type: application/json" \
             -d "{
-              \"text\": \"🔔 Runner agent update available\\n\\nCurrent version in Dockerfile: $CURRENT\\nLatest available version: $LATEST\"
+              \"type\": \"message\",
+              \"attachments\": [
+                {
+                  \"contentType\": \"application/vnd.microsoft.card.adaptive\",
+                  \"contentUrl\": null,
+                  \"content\": {
+                    \"type\": \"AdaptiveCard\",
+                    \"\$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",
+                    \"version\": \"1.2\",
+                    \"body\": [
+                      {
+                        \"type\": \"TextBlock\",
+                        \"text\": \"🔔 Runner Agent Update Available\",
+                        \"weight\": \"Bolder\",
+                        \"size\": \"Medium\"
+                      },
+                      {
+                        \"type\": \"TextBlock\",
+                        \"text\": \"A newer GitHub Actions Runner version is available.\",
+                        \"wrap\": true
+                      },
+                      {
+                        \"type\": \"FactSet\",
+                        \"facts\": [
+                          {
+                            \"title\": \"Current Version:\",
+                            \"value\": \"$CURRENT\"
+                          },
+                          {
+                            \"title\": \"Latest Version:\",
+                            \"value\": \"$LATEST\"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
             }" \
             -w "\nHTTP_STATUS:%{http_code}" \
             "${{ secrets.TEAMS_WEBHOOK_URL }}")
