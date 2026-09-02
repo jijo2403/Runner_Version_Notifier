@@ -23,9 +23,24 @@ jobs:
           echo "Latest version: $LATEST"
           echo "version=$LATEST" >> $GITHUB_OUTPUT
 
-      - name: Notify Teams if outdated
-        if: steps.current.outputs.version != steps.latest.outputs.version
+      - name: Compare versions and notify
         run: |
+          CURRENT="${{ steps.current.outputs.version }}"
+          LATEST="${{ steps.latest.outputs.version }}"
+
+          if [ "$CURRENT" = "$LATEST" ]; then
+            echo "Versions match — nothing to notify. Ending here."
+            exit 0
+          fi
+
+          OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n1)
+
+          if [ "$OLDEST" != "$CURRENT" ]; then
+            echo "Current version is newer than latest — not a downgrade. Ending here."
+            exit 0
+          fi
+
+          echo "Downgrade detected. Sending Teams notification."
           curl -H "Content-Type: application/json" -d '{
-            "text": "🔔 **Runner agent update available**\n\nCurrent version in Dockerfile: `${{ steps.current.outputs.version }}`\nLatest available version: `${{ steps.latest.outputs.version }}`\n\n[View release notes](https://github.com/actions/runner/releases/tag/v${{ steps.latest.outputs.version }})"
+            "text": "🔔 **Runner agent update available**\n\nCurrent version in Dockerfile: `'"$CURRENT"'`\nLatest available version: `'"$LATEST"'`"
           }' "${{ secrets.TEAMS_WEBHOOK_URL }}"
