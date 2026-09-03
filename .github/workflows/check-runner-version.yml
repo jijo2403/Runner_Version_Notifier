@@ -3,7 +3,11 @@ name: Check Runner Version and Deprecation
 on:
   workflow_dispatch:
 
- jobs:
+  schedule:
+    # Runs every day at 9:00 UTC
+    - cron: "0 9 * * *"
+
+jobs:
   check-runner:
     runs-on: ubuntu-latest
 
