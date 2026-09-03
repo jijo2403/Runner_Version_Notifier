@@ -3,9 +3,6 @@ name: Check Runner Version
 on:
   workflow_dispatch:
 
-  schedule:
-    - cron: "0 9 * * *"
-
 jobs:
   check-version:
     runs-on: ubuntu-latest
@@ -14,16 +11,11 @@ jobs:
       contents: read
 
     steps:
-
-      # --------------------------------------------------
-      # 1. Checkout repository
-      # --------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-
       # --------------------------------------------------
-      # 2. Get current runner version from Dockerfile
+      # Get current runner version from Dockerfile
       # --------------------------------------------------
       - name: Get current runner version
         id: current
@@ -39,9 +31,8 @@ jobs:
           echo "Current Runner Version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-
       # --------------------------------------------------
-      # 3. Get latest runner version from GitHub
+      # Get latest GitHub Actions Runner version
       # --------------------------------------------------
       - name: Get latest runner version
         id: latest
@@ -55,18 +46,17 @@ jobs:
             | sed 's/^v//')
 
           if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
-            echo "ERROR: Unable to get latest runner version"
+            echo "ERROR: Unable to retrieve latest runner version"
             exit 1
           fi
 
           echo "Latest Runner Version: $LATEST"
           echo "version=$LATEST" >> "$GITHUB_OUTPUT"
 
-
       # --------------------------------------------------
-      # 4. Compare current and latest versions
+      # Compare current and latest versions
       # --------------------------------------------------
-      - name: Compare runner versions
+      - name: Compare versions
         id: compare
         shell: bash
         run: |
@@ -82,7 +72,7 @@ jobs:
             exit 0
           fi
 
-          OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n1)
+          OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n 1)
 
           if [ "$OLDEST" = "$CURRENT" ]; then
             echo "A newer runner version is available."
@@ -92,15 +82,14 @@ jobs:
             echo "update_available=false" >> "$GITHUB_OUTPUT"
           fi
 
-
       # --------------------------------------------------
-      # 5. Check GitHub runner deprecation schedule
+      # Get deprecation information
       # --------------------------------------------------
       - name: Check deprecation schedule
         id: deprecation
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
           REPOSITORY: ${{ github.repository }}
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
         run: |
@@ -110,68 +99,65 @@ jobs:
           echo "Runner Version: $CURRENT_VERSION"
           echo ""
 
+          URL="https://api.github.com/repos/$REPOSITORY/actions/runners/deprecations/$CURRENT_VERSION"
+
           HTTP_STATUS=$(curl -sS \
+            -L \
             -o deprecation.json \
             -w "%{http_code}" \
-            -L \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/$REPOSITORY/actions/runners/deprecations/$CURRENT_VERSION")
+            "$URL")
 
           echo "GitHub API HTTP Status: $HTTP_STATUS"
           echo ""
 
-          cat deprecation.json
-          echo ""
-
           if [ "$HTTP_STATUS" = "200" ]; then
+
+            cat deprecation.json
+            echo ""
 
             DEPRECATION_DATE=$(jq -r '.runtime_deprecates_at // empty' deprecation.json)
 
-            if [ -n "$DEPRECATION_DATE" ]; then
-              echo "Deprecation Date: $DEPRECATION_DATE"
-
-              DEPRECATION_DATE_ONLY=$(echo "$DEPRECATION_DATE" | cut -d'T' -f1)
-
-              TODAY=$(date -u +"%Y-%m-%d")
-
-              TODAY_SECONDS=$(date -d "$TODAY" +%s)
-              DEPRECATION_SECONDS=$(date -d "$DEPRECATION_DATE_ONLY" +%s)
-
-              DIFFERENCE=$((DEPRECATION_SECONDS - TODAY_SECONDS))
-              DAYS_REMAINING=$((DIFFERENCE / 86400))
-
-              echo "Days Remaining: $DAYS_REMAINING"
-
-              echo "has_deprecation=true" >> "$GITHUB_OUTPUT"
-              echo "deprecation_date=$DEPRECATION_DATE_ONLY" >> "$GITHUB_OUTPUT"
-              echo "days_remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
-
-            else
+            if [ -z "$DEPRECATION_DATE" ]; then
               echo "No deprecation date returned."
-
               echo "has_deprecation=false" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
+
+            DEPRECATION_DATE_ONLY=$(echo "$DEPRECATION_DATE" | cut -d'T' -f1)
+
+            TODAY=$(date -u +"%Y-%m-%d")
+
+            TODAY_SECONDS=$(date -d "$TODAY" +%s)
+            DEPRECATION_SECONDS=$(date -d "$DEPRECATION_DATE_ONLY" +%s)
+
+            DIFFERENCE=$((DEPRECATION_SECONDS - TODAY_SECONDS))
+            DAYS_REMAINING=$((DIFFERENCE / 86400))
+
+            echo "Deprecation Date: $DEPRECATION_DATE_ONLY"
+            echo "Days Remaining: $DAYS_REMAINING"
+
+            echo "has_deprecation=true" >> "$GITHUB_OUTPUT"
+            echo "deprecation_date=$DEPRECATION_DATE_ONLY" >> "$GITHUB_OUTPUT"
+            echo "days_remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
 
           elif [ "$HTTP_STATUS" = "404" ]; then
 
-            echo "No EOL record found for this runner version."
-            echo "This does not mean the runner is deprecated."
-
+            echo "No EOL record found for runner version $CURRENT_VERSION."
             echo "has_deprecation=false" >> "$GITHUB_OUTPUT"
 
           elif [ "$HTTP_STATUS" = "401" ]; then
 
             echo "ERROR: Bad credentials."
-            echo "Check the RUNNER_TOKEN repository secret."
+            echo "Check the RUNNER_TOKEN secret."
             exit 1
 
           elif [ "$HTTP_STATUS" = "403" ]; then
 
-            echo "ERROR: Token does not have the required permission."
-            echo "Required permission:"
-            echo "Administration -> Read-only"
+            echo "ERROR: Token does not have sufficient permission."
+            echo "Required: Administration -> Read-only"
             exit 1
 
           else
@@ -182,16 +168,15 @@ jobs:
 
           fi
 
-
       # --------------------------------------------------
-      # 6. Display final result
+      # Display result
       # --------------------------------------------------
       - name: Display runner status
         shell: bash
         run: |
-          echo "=============================================="
+          echo "=========================================="
           echo "GitHub Actions Runner Status"
-          echo "=============================================="
+          echo "=========================================="
 
           echo "Current Version : ${{ steps.current.outputs.version }}"
           echo "Latest Version  : ${{ steps.latest.outputs.version }}"
@@ -203,11 +188,10 @@ jobs:
             echo "Deprecation Date : No EOL record"
           fi
 
-          echo "=============================================="
-
+          echo "=========================================="
 
       # --------------------------------------------------
-      # 7. Send Teams notification
+      # Send Teams notification
       # --------------------------------------------------
       - name: Send Teams notification
         if: |
@@ -222,7 +206,6 @@ jobs:
           DAYS_REMAINING: ${{ steps.deprecation.outputs.days_remaining }}
           HAS_DEPRECATION: ${{ steps.deprecation.outputs.has_deprecation }}
         run: |
-
           if [ "$HAS_DEPRECATION" = "true" ]; then
 
             TITLE="⚠️ GitHub Actions Runner Deprecation Warning"
@@ -246,12 +229,11 @@ jobs:
 
           fi
 
-          echo "Notification:"
-          echo "$TITLE"
+          echo "Sending Teams notification..."
           echo ""
+          echo "$TITLE"
           echo "$DETAILS"
 
-          # Create Adaptive Card payload
           jq -n \
             --arg title "$TITLE" \
             --arg details "$DETAILS" \
@@ -284,9 +266,8 @@ jobs:
               ]
             }' > teams-payload.json
 
-          echo "Sending notification to Teams..."
-
           HTTP_STATUS=$(curl -sS \
+            -L \
             -o teams-response.txt \
             -w "%{http_code}" \
             -X POST \
@@ -304,9 +285,8 @@ jobs:
 
           echo "Teams notification sent successfully."
 
-
       # --------------------------------------------------
-      # 8. No notification
+      # No notification
       # --------------------------------------------------
       - name: No notification required
         if: |
@@ -315,5 +295,5 @@ jobs:
         shell: bash
         run: |
           echo "Runner is up to date."
-          echo "No deprecation information available."
+          echo "No deprecation record found."
           echo "No Teams notification required."
