@@ -44,18 +44,40 @@ jobs:
       - name: Get latest runner version
         id: latest
         shell: bash
+        env:
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
+          echo "Getting latest GitHub Actions Runner version..."
+
           RESPONSE=$(curl -sS \
             -L \
             -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "https://api.github.com/repos/actions/runner/releases/latest")
 
-          LATEST=$(echo "$RESPONSE" | jq -r '.tag_name' | sed 's/^v//')
+          HTTP_STATUS=$(curl -sS \
+            -o latest-runner.json \
+            -w "%{http_code}" \
+            -L \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "https://api.github.com/repos/actions/runner/releases/latest")
 
-          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+          echo "GitHub API HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
             echo "ERROR: Unable to retrieve latest runner version"
-            echo "$RESPONSE"
+            cat latest-runner.json
+            exit 1
+          fi
+
+          LATEST=$(jq -r '.tag_name // empty' latest-runner.json | sed 's/^v//')
+
+          if [ -z "$LATEST" ]; then
+            echo "ERROR: Latest runner version was not found"
+            cat latest-runner.json
             exit 1
           fi
 
@@ -65,7 +87,7 @@ jobs:
 
 
       # --------------------------------------------------
-      # 4. Compare versions
+      # 4. Compare current and latest versions
       # --------------------------------------------------
       - name: Compare runner versions
         id: compare
@@ -129,15 +151,12 @@ jobs:
           cat deprecation.json
           echo ""
 
-          # ------------------------------------------------
-          # API returned deprecation information
-          # ------------------------------------------------
           if [ "$HTTP_STATUS" = "200" ]; then
 
             DEPRECATION_DATE=$(jq -r '.runtime_deprecates_at // empty' deprecation.json)
 
             if [ -z "$DEPRECATION_DATE" ]; then
-              echo "GitHub did not return runtime_deprecates_at."
+              echo "No runtime_deprecates_at value returned."
 
               echo "has_deprecation=false" >> "$GITHUB_OUTPUT"
               echo "deprecation_date=" >> "$GITHUB_OUTPUT"
@@ -164,41 +183,29 @@ jobs:
             echo "deprecation_date=$DEPRECATION_DATE_ONLY" >> "$GITHUB_OUTPUT"
             echo "days_remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
 
-          # ------------------------------------------------
-          # No EOL record
-          # ------------------------------------------------
           elif [ "$HTTP_STATUS" = "404" ]; then
 
-            echo "No EOL record found for runner version $CURRENT_VERSION."
+            echo "No EOL record found for $CURRENT_VERSION."
 
             echo "has_deprecation=false" >> "$GITHUB_OUTPUT"
             echo "deprecation_date=" >> "$GITHUB_OUTPUT"
             echo "days_remaining=" >> "$GITHUB_OUTPUT"
 
-          # ------------------------------------------------
-          # Invalid token
-          # ------------------------------------------------
           elif [ "$HTTP_STATUS" = "401" ]; then
 
-            echo "ERROR: GitHub authentication failed."
+            echo "ERROR: Bad credentials."
             echo "Check the RUNNER_TOKEN secret."
 
             exit 1
 
-          # ------------------------------------------------
-          # Permission problem
-          # ------------------------------------------------
           elif [ "$HTTP_STATUS" = "403" ]; then
 
-            echo "ERROR: GitHub token does not have permission."
+            echo "ERROR: Token does not have sufficient permission."
             echo "Required permission:"
             echo "Administration -> Read-only"
 
             exit 1
 
-          # ------------------------------------------------
-          # Other error
-          # ------------------------------------------------
           else
 
             echo "ERROR: GitHub API returned HTTP $HTTP_STATUS"
@@ -252,10 +259,6 @@ jobs:
           DAYS_REMAINING: ${{ steps.deprecation.outputs.days_remaining }}
         run: |
 
-          # ------------------------------------------------
-          # Build notification
-          # ------------------------------------------------
-
           if [ "$HAS_DEPRECATION" = "true" ]; then
 
             TITLE="⚠️ GitHub Actions Runner Deprecation Warning"
@@ -281,10 +284,7 @@ jobs:
           fi
 
 
-          # ------------------------------------------------
-          # Create Teams Adaptive Card
-          # ------------------------------------------------
-
+          # Create Adaptive Card
           jq -n \
             --arg title "$TITLE" \
             --arg details "$DETAILS" \
@@ -318,10 +318,6 @@ jobs:
             }' > teams-payload.json
 
 
-          # ------------------------------------------------
-          # Send notification to Teams
-          # ------------------------------------------------
-
           echo "Sending Teams notification..."
 
           HTTP_STATUS=$(curl -sS \
@@ -336,12 +332,23 @@ jobs:
           echo "Teams HTTP Status: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-
             echo "ERROR: Teams notification failed."
             cat teams-response.txt
-
             exit 1
-
           fi
 
           echo "Teams notification sent successfully."
+
+
+      # --------------------------------------------------
+      # 8. No notification required
+      # --------------------------------------------------
+      - name: No notification required
+        if: |
+          steps.compare.outputs.update_available == 'false' &&
+          steps.deprecation.outputs.has_deprecation == 'false'
+        shell: bash
+        run: |
+          echo "Runner is up to date."
+          echo "No deprecation record found."
+          echo "No Teams notification required."
