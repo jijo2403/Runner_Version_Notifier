@@ -3,11 +3,7 @@ name: Check Runner Version and Deprecation
 on:
   workflow_dispatch:
 
-  schedule:
-    # Run every day at 9:00 UTC
-    - cron: "0 9 * * *"
-
-jobs:
+ jobs:
   check-runner:
     runs-on: ubuntu-latest
 
@@ -39,7 +35,7 @@ jobs:
 
 
       # ==========================================================
-      # 3. Get latest GitHub Runner version
+      # 3. Get latest available GitHub Runner version
       # ==========================================================
       - name: Get latest runner version
         id: latest
@@ -62,7 +58,7 @@ jobs:
 
 
       # ==========================================================
-      # 4. Compare current version with latest version
+      # 4. Compare current and latest versions
       # ==========================================================
       - name: Compare runner versions
         id: comparison
@@ -86,25 +82,51 @@ jobs:
             echo "A newer runner version is available."
           else
             echo "status=current-newer" >> "$GITHUB_OUTPUT"
-            echo "Current runner version is newer than the latest release."
+            echo "Current runner version is newer than latest release."
           fi
 
 
       # ==========================================================
-      # 5. Get runner deprecation information
+      # 5. Test GitHub token
+      # ==========================================================
+      - name: Test GitHub token
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_RUNNER_TOKEN }}
+        run: |
+          echo "Testing GitHub authentication..."
+
+          HTTP_STATUS=$(curl -sS \
+            -o /tmp/github_response.json \
+            -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/user")
+
+          echo "GitHub authentication HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "ERROR: GitHub token authentication failed."
+            cat /tmp/github_response.json
+            exit 1
+          fi
+
+          echo "GitHub token authentication successful."
+
+
+      # ==========================================================
+      # 6. Get deprecation information
       # ==========================================================
       - name: Get runner deprecation date
         id: deprecation
         env:
-        
           GITHUB_TOKEN: ${{ secrets.GITHUB_RUNNER_TOKEN }}
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-
+          REPOSITORY: ${{ github.repository }}
         run: |
 
           echo "Checking deprecation schedule..."
-          echo "Organization: $ORG_NAME"
+          echo "Repository: $REPOSITORY"
           echo "Runner Version: $CURRENT_VERSION"
 
           RESPONSE=$(curl -sS \
@@ -113,7 +135,7 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runners/deprecations/${CURRENT_VERSION}")
+            "https://api.github.com/repos/${REPOSITORY}/actions/runners/deprecations/${CURRENT_VERSION}")
 
           HTTP_STATUS=$(echo "$RESPONSE" \
             | grep "HTTP_STATUS:" \
@@ -147,14 +169,13 @@ jobs:
 
 
       # ==========================================================
-      # 6. Calculate days remaining
+      # 7. Calculate days remaining
       # ==========================================================
       - name: Calculate deprecation status
         id: calculate
         if: steps.deprecation.outputs.has_date == 'true'
         env:
           DEPRECATION_DATE: ${{ steps.deprecation.outputs.deprecation_date }}
-
         run: |
 
           TODAY=$(date -u +%s)
@@ -175,7 +196,7 @@ jobs:
 
 
       # ==========================================================
-      # 7. Display complete runner status
+      # 8. Display runner status
       # ==========================================================
       - name: Display runner status
         run: |
@@ -188,35 +209,17 @@ jobs:
           echo "Latest Version  : ${{ steps.latest.outputs.version }}"
 
           if [ "${{ steps.deprecation.outputs.has_date }}" = "true" ]; then
-
             echo "Deprecation Date : ${{ steps.deprecation.outputs.deprecation_date }}"
             echo "Days Remaining   : ${{ steps.calculate.outputs.days_remaining }}"
-
           else
-
             echo "Deprecation Date : Not available"
-
           fi
 
           echo "=========================================="
 
 
       # ==========================================================
-      # 8. Send Teams notification
-      # ==========================================================
-      #
-      # Notification will be sent when:
-      #
-      # - A newer version is available
-      #
-      # OR
-      #
-      # - Current version is within 30 days of deprecation
-      #
-      # OR
-      #
-      # - Current version is already deprecated
-      #
+      # 9. Send Teams notification
       # ==========================================================
       - name: Send Teams notification
         if: |
@@ -235,10 +238,6 @@ jobs:
           HAS_DEPRECATION_DATE: ${{ steps.deprecation.outputs.has_date }}
 
         run: |
-
-          # ------------------------------------------------------
-          # Determine notification title and message
-          # ------------------------------------------------------
 
           if [ "$HAS_DEPRECATION_DATE" = "true" ] && [ "$DAYS_REMAINING" -lt 0 ]; then
 
@@ -273,14 +272,13 @@ jobs:
           fi
 
 
-          echo "Notification:"
           echo "$TITLE"
           echo "$MESSAGE"
 
 
-          # ------------------------------------------------------
-          # Build Adaptive Card
-          # ------------------------------------------------------
+          # ======================================================
+          # Create Teams Adaptive Card
+          # ======================================================
 
           if [ "$HAS_DEPRECATION_DATE" = "true" ]; then
 
@@ -397,9 +395,9 @@ jobs:
           fi
 
 
-          # ------------------------------------------------------
-          # Send to Microsoft Teams Workflow webhook
-          # ------------------------------------------------------
+          # ======================================================
+          # Send notification to Teams
+          # ======================================================
 
           echo "Sending Teams notification..."
 
