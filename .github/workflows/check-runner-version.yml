@@ -96,9 +96,10 @@ jobs:
       - name: Get runner deprecation date
         id: deprecation
         env:
+        
           GITHUB_TOKEN: ${{ secrets.GITHUB_RUNNER_TOKEN }}
-          ORG_NAME: ${{ github.repository_owner }}
           CURRENT_VERSION: ${{ steps.current.outputs.version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
 
         run: |
 
