@@ -3,6 +3,10 @@ name: Check Runner Version and Deprecation
 on:
   workflow_dispatch:
 
+  schedule:
+    # Runs every day at 9:00 UTC
+    - cron: "0 9 * * *"
+
 jobs:
   check-runner:
     runs-on: ubuntu-latest
@@ -41,7 +45,7 @@ jobs:
 
 
       # ==========================================================
-      # 3. Get latest GitHub Runner version
+      # 3. Get latest GitHub Actions Runner version
       # ==========================================================
       - name: Get latest runner version
         id: latest
@@ -49,15 +53,34 @@ jobs:
 
           echo "Checking latest GitHub Actions Runner release..."
 
-          LATEST=$(curl -sS \
+          RESPONSE=$(curl -sS \
+            -w "\nHTTP_STATUS:%{http_code}" \
+            -L \
             -H "Accept: application/vnd.github+json" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/actions/runner/releases/latest" \
+            "https://api.github.com/repos/actions/runner/releases/latest")
+
+          HTTP_STATUS=$(echo "$RESPONSE" \
+            | grep "HTTP_STATUS:" \
+            | cut -d: -f2)
+
+          JSON=$(echo "$RESPONSE" \
+            | sed '/HTTP_STATUS:/d')
+
+          echo "GitHub API HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "ERROR: Unable to retrieve latest runner version."
+            echo "$JSON"
+            exit 1
+          fi
+
+          LATEST=$(echo "$JSON" \
             | jq -r '.tag_name' \
             | sed 's/^v//')
 
           if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
-            echo "ERROR: Unable to retrieve latest runner version."
+            echo "ERROR: Latest runner version was not found."
             exit 1
           fi
 
@@ -85,31 +108,39 @@ jobs:
 
             echo "Runner is already using the latest version."
 
-            exit 0
-
-          fi
-
-          OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n1)
-
-          if [ "$OLDEST" = "$CURRENT" ]; then
-
-            echo "status=update-available" >> "$GITHUB_OUTPUT"
-
-            echo "Runner version update is available."
-
           else
 
-            echo "status=current-newer" >> "$GITHUB_OUTPUT"
+            OLDEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST" | sort -V | head -n1)
 
-            echo "Current runner version is newer than latest release."
+            if [ "$OLDEST" = "$CURRENT" ]; then
+
+              echo "status=update-available" >> "$GITHUB_OUTPUT"
+
+              echo "Runner version update is available."
+
+            else
+
+              echo "status=current-newer" >> "$GITHUB_OUTPUT"
+
+              echo "Current runner version is newer than latest release."
+
+            fi
 
           fi
 
 
       # ==========================================================
-      # 5. Get runner deprecation date
+      # 5. Get runner deprecation information
       # ==========================================================
-      - name: Get runner deprecation date
+      #
+      # IMPORTANT:
+      # A 404 does NOT fail the workflow.
+      #
+      # It means GitHub did not return a deprecation record
+      # for this repository/version combination.
+      #
+      # ==========================================================
+      - name: Get runner deprecation information
         id: deprecation
         env:
           RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
@@ -122,52 +153,90 @@ jobs:
           echo ""
           echo "Repository: $REPOSITORY"
           echo "Runner Version: $CURRENT_VERSION"
+          echo ""
 
-          RESPONSE=$(curl -sS \
+          HTTP_STATUS=$(curl -sS \
+            -o deprecation.json \
+            -w "%{http_code}" \
             -L \
-            -w "\nHTTP_STATUS:%{http_code}" \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer $RUNNER_TOKEN" \
             -H "X-GitHub-Api-Version: 2026-03-10" \
             "https://api.github.com/repos/${REPOSITORY}/actions/runners/deprecations/${CURRENT_VERSION}")
 
-          HTTP_STATUS=$(echo "$RESPONSE" \
-            | grep "HTTP_STATUS:" \
-            | cut -d: -f2)
-
-          JSON=$(echo "$RESPONSE" \
-            | sed '/HTTP_STATUS:/d')
-
-          echo ""
           echo "GitHub API HTTP Status: $HTTP_STATUS"
+          echo ""
+          echo "GitHub API Response:"
+          cat deprecation.json
+          echo ""
 
-          if [ "$HTTP_STATUS" != "200" ]; then
+          # ------------------------------------------------------
+          # API returned deprecation information
+          # ------------------------------------------------------
+          if [ "$HTTP_STATUS" = "200" ]; then
 
-            echo "ERROR: Unable to retrieve deprecation information."
-            echo ""
-            echo "$JSON"
+            echo "Deprecation information found."
 
-            exit 1
+            DEPRECATION_DATE=$(jq -r '.runtime_deprecates_at // empty' deprecation.json)
 
-          fi
+            if [ -n "$DEPRECATION_DATE" ]; then
 
-          DEPRECATION_DATE=$(echo "$JSON" \
-            | jq -r '.runtime_deprecates_at')
+              echo "Deprecation Date: $DEPRECATION_DATE"
 
-          echo "Deprecation Date: $DEPRECATION_DATE"
+              echo "has_date=true" >> "$GITHUB_OUTPUT"
+              echo "deprecation_date=$DEPRECATION_DATE" >> "$GITHUB_OUTPUT"
 
-          if [ "$DEPRECATION_DATE" = "null" ] || [ -z "$DEPRECATION_DATE" ]; then
+            else
 
-            echo "No deprecation date returned."
+              echo "No runtime deprecation date returned."
+
+              echo "has_date=false" >> "$GITHUB_OUTPUT"
+
+            fi
+
+          # ------------------------------------------------------
+          # API returned 404
+          # ------------------------------------------------------
+          elif [ "$HTTP_STATUS" = "404" ]; then
+
+            echo "No deprecation record was returned by GitHub."
+            echo "This does NOT mean the runner is deprecated."
+            echo "Continuing workflow..."
 
             echo "has_date=false" >> "$GITHUB_OUTPUT"
 
-            exit 0
+          # ------------------------------------------------------
+          # Authentication / permission problem
+          # ------------------------------------------------------
+          elif [ "$HTTP_STATUS" = "401" ]; then
+
+            echo "ERROR: GitHub authentication failed."
+            echo "Check the RUNNER_TOKEN secret."
+
+            exit 1
+
+          elif [ "$HTTP_STATUS" = "403" ]; then
+
+            echo "ERROR: GitHub denied access to the deprecation API."
+            echo ""
+            echo "Check that the fine-grained PAT has:"
+            echo "Administration -> Read-only"
+            echo "for this repository."
+
+            exit 1
+
+          # ------------------------------------------------------
+          # Other API error
+          # ------------------------------------------------------
+          else
+
+            echo "WARNING: GitHub returned HTTP $HTTP_STATUS."
+            echo "Deprecation information will not be used."
+            echo "Continuing workflow..."
+
+            echo "has_date=false" >> "$GITHUB_OUTPUT"
 
           fi
-
-          echo "has_date=true" >> "$GITHUB_OUTPUT"
-          echo "deprecation_date=$DEPRECATION_DATE" >> "$GITHUB_OUTPUT"
 
 
       # ==========================================================
@@ -181,7 +250,7 @@ jobs:
 
         run: |
 
-          echo "Calculating days remaining..."
+          echo "Calculating deprecation status..."
 
           TODAY=$(date -u +%s)
 
@@ -201,7 +270,7 @@ jobs:
 
 
       # ==========================================================
-      # 7. Display runner status
+      # 7. Display complete status
       # ==========================================================
       - name: Display runner status
         run: |
@@ -220,7 +289,7 @@ jobs:
 
           else
 
-            echo "Deprecation Date : Not available"
+            echo "Deprecation Date : Not available from API"
 
           fi
 
@@ -229,6 +298,16 @@ jobs:
 
       # ==========================================================
       # 8. Send Teams notification
+      # ==========================================================
+      #
+      # Notification is sent when:
+      #
+      # A. New runner version is available
+      #
+      # OR
+      #
+      # B. Runner is within 30 days of deprecation
+      #
       # ==========================================================
       - name: Send Teams notification
         if: |
@@ -249,6 +328,10 @@ jobs:
         run: |
 
           echo "Preparing Teams notification..."
+
+          # ------------------------------------------------------
+          # Determine notification type
+          # ------------------------------------------------------
 
           if [ "$HAS_DEPRECATION_DATE" = "true" ] && [ "$DAYS_REMAINING" -lt 0 ]; then
 
@@ -282,128 +365,128 @@ jobs:
           echo "Message: $MESSAGE"
 
 
-          # ======================================================
-          # Create Teams Adaptive Card
-          # ======================================================
+          # ------------------------------------------------------
+          # Build Adaptive Card
+          # ------------------------------------------------------
 
           if [ "$HAS_DEPRECATION_DATE" = "true" ]; then
 
             CARD=$(cat <<EOF
+{
+  "type": "message",
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null,
+      "content": {
+        "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.2",
+        "body": [
           {
-            "type": "message",
-            "attachments": [
+            "type": "TextBlock",
+            "text": "$TITLE",
+            "weight": "Bolder",
+            "size": "Medium",
+            "wrap": true
+          },
+          {
+            "type": "TextBlock",
+            "text": "$MESSAGE",
+            "wrap": true
+          },
+          {
+            "type": "FactSet",
+            "facts": [
               {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "contentUrl": null,
-                "content": {
-                  "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                  "type": "AdaptiveCard",
-                  "version": "1.2",
-                  "body": [
-                    {
-                      "type": "TextBlock",
-                      "text": "$TITLE",
-                      "weight": "Bolder",
-                      "size": "Medium",
-                      "wrap": true
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "$MESSAGE",
-                      "wrap": true
-                    },
-                    {
-                      "type": "FactSet",
-                      "facts": [
-                        {
-                          "title": "Current Version:",
-                          "value": "$CURRENT_VERSION"
-                        },
-                        {
-                          "title": "Latest Version:",
-                          "value": "$LATEST_VERSION"
-                        },
-                        {
-                          "title": "Deprecation Date:",
-                          "value": "$DEPRECATION_DATE"
-                        },
-                        {
-                          "title": "Days Remaining:",
-                          "value": "$DAYS_REMAINING"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "Please update the runner version in the Dockerfile and rebuild the runner image.",
-                      "wrap": true
-                    }
-                  ]
-                }
+                "title": "Current Version:",
+                "value": "$CURRENT_VERSION"
+              },
+              {
+                "title": "Latest Version:",
+                "value": "$LATEST_VERSION"
+              },
+              {
+                "title": "Deprecation Date:",
+                "value": "$DEPRECATION_DATE"
+              },
+              {
+                "title": "Days Remaining:",
+                "value": "$DAYS_REMAINING"
               }
             ]
+          },
+          {
+            "type": "TextBlock",
+            "text": "Please update the runner version in the Dockerfile and rebuild the runner image.",
+            "wrap": true
           }
-          EOF
-          )
+        ]
+      }
+    }
+  ]
+}
+EOF
+)
 
           else
 
             CARD=$(cat <<EOF
+{
+  "type": "message",
+  "attachments": [
+    {
+      "contentType": "application/vnd.microsoft.card.adaptive",
+      "contentUrl": null,
+      "content": {
+        "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.2",
+        "body": [
           {
-            "type": "message",
-            "attachments": [
+            "type": "TextBlock",
+            "text": "$TITLE",
+            "weight": "Bolder",
+            "size": "Medium",
+            "wrap": true
+          },
+          {
+            "type": "TextBlock",
+            "text": "$MESSAGE",
+            "wrap": true
+          },
+          {
+            "type": "FactSet",
+            "facts": [
               {
-                "contentType": "application/vnd.microsoft.card.adaptive",
-                "contentUrl": null,
-                "content": {
-                  "\$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                  "type": "AdaptiveCard",
-                  "version": "1.2",
-                  "body": [
-                    {
-                      "type": "TextBlock",
-                      "text": "$TITLE",
-                      "weight": "Bolder",
-                      "size": "Medium",
-                      "wrap": true
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "$MESSAGE",
-                      "wrap": true
-                    },
-                    {
-                      "type": "FactSet",
-                      "facts": [
-                        {
-                          "title": "Current Version:",
-                          "value": "$CURRENT_VERSION"
-                        },
-                        {
-                          "title": "Latest Version:",
-                          "value": "$LATEST_VERSION"
-                        }
-                      ]
-                    },
-                    {
-                      "type": "TextBlock",
-                      "text": "Please review the new runner version and update the Dockerfile when appropriate.",
-                      "wrap": true
-                    }
-                  ]
-                }
+                "title": "Current Version:",
+                "value": "$CURRENT_VERSION"
+              },
+              {
+                "title": "Latest Version:",
+                "value": "$LATEST_VERSION"
               }
             ]
+          },
+          {
+            "type": "TextBlock",
+            "text": "Deprecation information is not currently available from the GitHub API for this version.",
+            "wrap": true
           }
-          EOF
-          )
+        ]
+      }
+    }
+  ]
+}
+EOF
+)
 
           fi
 
 
-          # ======================================================
-          # Send notification to Teams
-          # ======================================================
+          # ------------------------------------------------------
+          # Send to Teams
+          # ------------------------------------------------------
 
           echo "Sending Teams notification..."
 
