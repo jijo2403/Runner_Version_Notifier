@@ -1,4 +1,4 @@
-name: new Runner Version
+name: New Runner Version
 
 on:
   workflow_dispatch:
@@ -12,26 +12,26 @@ jobs:
 
     steps:
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 1. Checkout repository
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
 
-      # ---------------------------------------------------------
-      # 2. Extract current runner version from Dockerfile
-      # ---------------------------------------------------------
-      - name: Extract current runner version
+      # =========================================================
+      # 2. Get current runner version from Dockerfile
+      # =========================================================
+      - name: Get current runner version
         id: current
         shell: bash
         run: |
           set -euo pipefail
 
-          VERSION=$(grep -oP 'ARG RUNNER_VERSION="\K[^"]+' Dockerfile)
+          VERSION=$(grep -oP 'ARG RUNNER_VERSION="\K[^"]+' Dockerfile || true)
 
           if [ -z "$VERSION" ]; then
-            echo "ERROR: Could not find RUNNER_VERSION in Dockerfile"
+            echo "ERROR: RUNNER_VERSION not found in Dockerfile"
             exit 1
           fi
 
@@ -40,58 +40,56 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 3. Get GitHub Actions Runner releases
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Get runner releases
         id: releases
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.RUNNER_TOKEN }}
+          RUNNER_TOKEN: ${{ secrets.RUNNER_TOKEN }}
         run: |
           set -euo pipefail
 
+          echo "Getting GitHub Actions Runner releases..."
+
           HTTP_STATUS=$(curl -sS \
+            -L \
             -o releases.json \
             -w "%{http_code}" \
-            -L \
             -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Authorization: Bearer $RUNNER_TOKEN" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/actions/runner/releases?per_page=100")
 
           echo "GitHub API HTTP Status: $HTTP_STATUS"
 
           if [ "$HTTP_STATUS" != "200" ]; then
-            echo "ERROR: Unable to retrieve GitHub Actions Runner releases"
+            echo "ERROR: Unable to retrieve runner releases."
             cat releases.json
             exit 1
           fi
 
           echo "Runner releases downloaded successfully."
 
-          jq -r '
-            .[]
-            | select(.draft == false)
-            | select(.prerelease == false)
-            | "\(.tag_name) \(.published_at)"
-          ' releases.json
 
-
-      # ---------------------------------------------------------
-      # 4. Find the first newer runner version
-      # ---------------------------------------------------------
-      - name: Determine newer runner version
-        id: newer
+      # =========================================================
+      # 4. Find FIRST newer version AND LATEST version
+      # =========================================================
+      - name: Determine runner versions
+        id: versions
         shell: bash
         env:
           CURRENT: ${{ steps.current.outputs.version }}
         run: |
           set -euo pipefail
 
-          echo "Current version: $CURRENT"
+          echo "Current runner version: $CURRENT"
 
-          NEWER_RELEASE=$(jq -c --arg current "$CURRENT" '
+          # -----------------------------------------------------
+          # Find the FIRST version newer than the current version
+          # -----------------------------------------------------
+          FIRST_NEWER=$(jq -c --arg current "$CURRENT" '
             [
               .[]
               | select(.draft == false)
@@ -122,54 +120,103 @@ jobs:
             | .[0]
           ' releases.json)
 
-          if [ "$NEWER_RELEASE" = "null" ] || [ -z "$NEWER_RELEASE" ]; then
+          if [ "$FIRST_NEWER" = "null" ] || [ -z "$FIRST_NEWER" ]; then
             echo "No newer runner version found."
 
             echo "available=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          NEW_VERSION=$(echo "$NEWER_RELEASE" | jq -r '.version')
-          RELEASE_DATE=$(echo "$NEWER_RELEASE" | jq -r '.published_at')
+          FIRST_VERSION=$(echo "$FIRST_NEWER" | jq -r '.version')
+          FIRST_RELEASE_DATE=$(echo "$FIRST_NEWER" | jq -r '.published_at')
 
-          echo "Newer version: $NEW_VERSION"
-          echo "Release date: $RELEASE_DATE"
+          echo "First newer version: $FIRST_VERSION"
+          echo "First newer release date: $FIRST_RELEASE_DATE"
 
+
+          # -----------------------------------------------------
+          # Find the LATEST version
+          # -----------------------------------------------------
+          LATEST=$(jq -c '
+            [
+              .[]
+              | select(.draft == false)
+              | select(.prerelease == false)
+              | {
+                  version: (.tag_name | sub("^v"; "")),
+                  published_at: .published_at
+                }
+            ]
+            | sort_by(
+                .version
+                | split(".")
+                | map(tonumber)
+              )
+            | .[-1]
+          ' releases.json)
+
+          LATEST_VERSION=$(echo "$LATEST" | jq -r '.version')
+          LATEST_RELEASE_DATE=$(echo "$LATEST" | jq -r '.published_at')
+
+          echo "Latest runner version: $LATEST_VERSION"
+          echo "Latest release date: $LATEST_RELEASE_DATE"
+
+
+          # -----------------------------------------------------
+          # Save outputs
+          # -----------------------------------------------------
           echo "available=true" >> "$GITHUB_OUTPUT"
-          echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
-          echo "release_date=$RELEASE_DATE" >> "$GITHUB_OUTPUT"
+
+          echo "first_version=$FIRST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "first_release_date=$FIRST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
+
+          echo "latest_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "latest_release_date=$LATEST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
 
 
-      # ---------------------------------------------------------
-      # 5. Calculate how old the newer version is
-      # ---------------------------------------------------------
+      # =========================================================
+      # 5. Calculate age of FIRST newer version
+      # =========================================================
       - name: Calculate update age
         id: age
-        if: steps.newer.outputs.available == 'true'
+        if: steps.versions.outputs.available == 'true'
         shell: bash
         env:
-          RELEASE_DATE: ${{ steps.newer.outputs.release_date }}
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
         run: |
           set -euo pipefail
 
-          RELEASE_EPOCH=$(date -d "$RELEASE_DATE" +%s)
+          RELEASE_EPOCH=$(date -d "$FIRST_RELEASE_DATE" +%s)
           NOW_EPOCH=$(date -u +%s)
 
           AGE_SECONDS=$((NOW_EPOCH - RELEASE_EPOCH))
+
+          if [ "$AGE_SECONDS" -lt 0 ]; then
+            AGE_SECONDS=0
+          fi
+
           AGE_DAYS=$((AGE_SECONDS / 86400))
 
-          echo "Release date: $RELEASE_DATE"
-          echo "Days since release: $AGE_DAYS"
+          DAYS_REMAINING=$((30 - AGE_DAYS))
+
+          if [ "$DAYS_REMAINING" -lt 0 ]; then
+            DAYS_REMAINING=0
+          fi
+
+          echo "First newer release: $FIRST_RELEASE_DATE"
+          echo "Days since first newer release: $AGE_DAYS"
+          echo "Days remaining: $DAYS_REMAINING"
 
           echo "days=$AGE_DAYS" >> "$GITHUB_OUTPUT"
+          echo "remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
 
 
-      # ---------------------------------------------------------
+      # =========================================================
       # 6. Determine notification level
-      # ---------------------------------------------------------
+      # =========================================================
       - name: Determine notification level
         id: notification
-        if: steps.newer.outputs.available == 'true'
+        if: steps.versions.outputs.available == 'true'
         shell: bash
         env:
           DAYS: ${{ steps.age.outputs.days }}
@@ -178,12 +225,16 @@ jobs:
 
           if [ "$DAYS" -ge 30 ]; then
             LEVEL="CRITICAL"
+
           elif [ "$DAYS" -ge 25 ]; then
             LEVEL="CRITICAL"
+
           elif [ "$DAYS" -ge 21 ]; then
             LEVEL="URGENT"
+
           elif [ "$DAYS" -ge 14 ]; then
             LEVEL="WARNING"
+
           else
             LEVEL="NONE"
           fi
@@ -193,45 +244,75 @@ jobs:
           echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
 
 
-      # ---------------------------------------------------------
-      # 7. Send Microsoft Teams notification
-      # ---------------------------------------------------------
-      - name: Notify Teams
+      # =========================================================
+      # 7. Display result
+      # =========================================================
+      - name: Display runner status
+        if: always()
+        shell: bash
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+          LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
+          DAYS: ${{ steps.age.outputs.days }}
+          REMAINING: ${{ steps.age.outputs.remaining }}
+        run: |
+          echo "=========================================="
+          echo "GitHub Actions Runner Status"
+          echo "=========================================="
+
+          echo "Current Version        : $CURRENT"
+          echo "First Newer Version    : ${FIRST_VERSION:-N/A}"
+          echo "First Release Date     : ${FIRST_RELEASE_DATE:-N/A}"
+          echo "Latest Version         : ${LATEST_VERSION:-N/A}"
+          echo "Latest Release Date    : ${LATEST_RELEASE_DATE:-N/A}"
+          echo "Days Since First Newer : ${DAYS:-N/A}"
+          echo "Days Remaining         : ${REMAINING:-N/A}"
+
+          echo "=========================================="
+
+
+      # =========================================================
+      # 8. Send Teams notification
+      # =========================================================
+      - name: Send Teams notification
         if: |
-          steps.newer.outputs.available == 'true' &&
+          steps.versions.outputs.available == 'true' &&
           steps.notification.outputs.level != 'NONE'
         shell: bash
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           CURRENT: ${{ steps.current.outputs.version }}
-          NEW_VERSION: ${{ steps.newer.outputs.version }}
-          RELEASE_DATE: ${{ steps.newer.outputs.release_date }}
+          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
           DAYS: ${{ steps.age.outputs.days }}
+          REMAINING: ${{ steps.age.outputs.remaining }}
           LEVEL: ${{ steps.notification.outputs.level }}
         run: |
           set -euo pipefail
 
           if [ "$LEVEL" = "WARNING" ]; then
-            TITLE="🟡 GitHub Actions Runner Warning"
+            TITLE="🟡 GitHub Actions Runner Update Warning"
+
           elif [ "$LEVEL" = "URGENT" ]; then
-            TITLE="🟠 GitHub Actions Runner Urgent"
+            TITLE="🟠 GitHub Actions Runner Update Urgent"
+
           else
-            TITLE="🔴 GitHub Actions Runner Critical"
+            TITLE="🔴 GitHub Actions Runner Update Critical"
           fi
 
-          DAYS_REMAINING=$((30 - DAYS))
-
-          if [ "$DAYS_REMAINING" -lt 0 ]; then
-            DAYS_REMAINING=0
-          fi
 
           PAYLOAD=$(jq -n \
             --arg title "$TITLE" \
             --arg current "$CURRENT" \
-            --arg latest "$NEW_VERSION" \
-            --arg release_date "$RELEASE_DATE" \
+            --arg first "$FIRST_VERSION" \
+            --arg first_date "$FIRST_RELEASE_DATE" \
+            --arg latest "$LATEST_VERSION" \
             --arg days "$DAYS" \
-            --arg remaining "$DAYS_REMAINING" \
+            --arg remaining "$REMAINING" \
             --arg level "$LEVEL" \
             '{
               type: "message",
@@ -243,7 +324,9 @@ jobs:
                     "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
                     type: "AdaptiveCard",
                     version: "1.2",
+
                     body: [
+
                       {
                         type: "TextBlock",
                         text: $title,
@@ -251,51 +334,68 @@ jobs:
                         size: "Medium",
                         wrap: true
                       },
+
                       {
                         type: "TextBlock",
-                        text: "Your self-hosted GitHub Actions runner has a newer software version available.",
+                        text: "A newer GitHub Actions Runner software version is available.",
                         wrap: true
                       },
+
                       {
                         type: "FactSet",
                         facts: [
+
                           {
                             title: "Current Version:",
                             value: $current
                           },
+
                           {
                             title: "Latest Version:",
                             value: $latest
                           },
+
                           {
-                            title: "Release Date:",
-                            value: $release_date
+                            title: "First Newer Version:",
+                            value: $first
                           },
+
+                          {
+                            title: "First Release Date:",
+                            value: $first_date
+                          },
+
                           {
                             title: "Days Since Release:",
                             value: $days
                           },
+
                           {
                             title: "Approx. Days Remaining:",
                             value: $remaining
                           },
+
                           {
                             title: "Severity:",
                             value: $level
                           }
+
                         ]
                       },
+
                       {
                         type: "TextBlock",
                         text: "Please update the runner Docker image.",
                         wrap: true,
                         weight: "Bolder"
                       }
+
                     ]
                   }
                 }
               ]
             }')
+
 
           echo "Sending Teams notification..."
 
