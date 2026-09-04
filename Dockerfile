@@ -1,6 +1,6 @@
 FROM ubuntu:22.04
 
-ARG RUNNER_VERSION="2.300.0"
+ARG RUNNER_VERSION="2.336.0"
 
 RUN apt-get update && apt-get install -y \
     curl \
