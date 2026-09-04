@@ -1,4 +1,4 @@
-name: Check Runner Version
+name: new Runner Version
 
 on:
   workflow_dispatch:
