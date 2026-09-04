@@ -1,4 +1,4 @@
-name: New Runner Version
+name: new Runner Version
 
 on:
   workflow_dispatch:
@@ -74,7 +74,7 @@ jobs:
 
 
       # =========================================================
-      # 4. Find FIRST newer version AND LATEST version
+      # 4. Find first newer version AND latest version
       # =========================================================
       - name: Determine runner versions
         id: versions
@@ -86,8 +86,9 @@ jobs:
 
           echo "Current runner version: $CURRENT"
 
+
           # -----------------------------------------------------
-          # Find the FIRST version newer than the current version
+          # Find FIRST version newer than current version
           # -----------------------------------------------------
           FIRST_NEWER=$(jq -c --arg current "$CURRENT" '
             [
@@ -124,8 +125,10 @@ jobs:
             echo "No newer runner version found."
 
             echo "available=false" >> "$GITHUB_OUTPUT"
+
             exit 0
           fi
+
 
           FIRST_VERSION=$(echo "$FIRST_NEWER" | jq -r '.version')
           FIRST_RELEASE_DATE=$(echo "$FIRST_NEWER" | jq -r '.published_at')
@@ -135,7 +138,7 @@ jobs:
 
 
           # -----------------------------------------------------
-          # Find the LATEST version
+          # Find LATEST version
           # -----------------------------------------------------
           LATEST=$(jq -c '
             [
@@ -154,6 +157,7 @@ jobs:
               )
             | .[-1]
           ' releases.json)
+
 
           LATEST_VERSION=$(echo "$LATEST" | jq -r '.version')
           LATEST_RELEASE_DATE=$(echo "$LATEST" | jq -r '.published_at')
@@ -175,7 +179,7 @@ jobs:
 
 
       # =========================================================
-      # 5. Calculate age of FIRST newer version
+      # 5. Calculate update age
       # =========================================================
       - name: Calculate update age
         id: age
@@ -245,7 +249,7 @@ jobs:
 
 
       # =========================================================
-      # 7. Display result
+      # 7. Display runner status
       # =========================================================
       - name: Display runner status
         if: always()
@@ -258,6 +262,7 @@ jobs:
           LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
           DAYS: ${{ steps.age.outputs.days }}
           REMAINING: ${{ steps.age.outputs.remaining }}
+          LEVEL: ${{ steps.notification.outputs.level }}
         run: |
           echo "=========================================="
           echo "GitHub Actions Runner Status"
@@ -270,17 +275,19 @@ jobs:
           echo "Latest Release Date    : ${LATEST_RELEASE_DATE:-N/A}"
           echo "Days Since First Newer : ${DAYS:-N/A}"
           echo "Days Remaining         : ${REMAINING:-N/A}"
+          echo "Notification Level     : ${LEVEL:-N/A}"
 
           echo "=========================================="
 
 
       # =========================================================
       # 8. Send Teams notification
+      #
+      # IMPORTANT:
+      # Notification is sent even when LEVEL = NONE
       # =========================================================
       - name: Send Teams notification
-        if: |
-          steps.versions.outputs.available == 'true' &&
-          steps.notification.outputs.level != 'NONE'
+        if: steps.versions.outputs.available == 'true'
         shell: bash
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -294,7 +301,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "$LEVEL" = "WARNING" ]; then
+
+          # -----------------------------------------------------
+          # Determine Teams title
+          # -----------------------------------------------------
+          if [ "$LEVEL" = "NONE" ]; then
+            TITLE="🔔 GitHub Actions Runner Update Available"
+
+          elif [ "$LEVEL" = "WARNING" ]; then
             TITLE="🟡 GitHub Actions Runner Update Warning"
 
           elif [ "$LEVEL" = "URGENT" ]; then
@@ -305,6 +319,9 @@ jobs:
           fi
 
 
+          # -----------------------------------------------------
+          # Create Adaptive Card
+          # -----------------------------------------------------
           PAYLOAD=$(jq -n \
             --arg title "$TITLE" \
             --arg current "$CURRENT" \
@@ -397,6 +414,9 @@ jobs:
             }')
 
 
+          # -----------------------------------------------------
+          # Send notification to Teams
+          # -----------------------------------------------------
           echo "Sending Teams notification..."
 
           HTTP_STATUS=$(curl -sS \
@@ -407,12 +427,17 @@ jobs:
             -d "$PAYLOAD" \
             "$TEAMS_WEBHOOK_URL")
 
+
           echo "Teams HTTP Status: $HTTP_STATUS"
+
 
           if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
             echo "ERROR: Teams notification failed."
+
             cat teams-response.txt
+
             exit 1
           fi
+
 
           echo "Teams notification sent successfully."
