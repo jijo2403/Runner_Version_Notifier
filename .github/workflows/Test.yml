@@ -1,0 +1,495 @@
+name: Docker image Notification
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # =========================================================
+      # 1. Checkout repository
+      # =========================================================
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+
+      # =========================================================
+      # 2. Get current runner version from the release tag in
+      #    Dockerfile (repo root)
+      # =========================================================
+      - name: Get current runner version
+        id: current
+        shell: bash
+        env:
+          SOURCE_FILE: Dockerfile
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$SOURCE_FILE" ]; then
+            echo "ERROR: $SOURCE_FILE not found"
+            exit 1
+          fi
+
+          # Read the version only from the release tag in the download URL:
+          #   .../actions/runner/releases/download/v2.336.0/...  ->  2.336.0
+          VERSIONS=$(grep -oP 'actions/runner/releases/download/v\K[0-9]+\.[0-9]+\.[0-9]+' "$SOURCE_FILE" | sort -u || true)
+
+          if [ -z "$VERSIONS" ]; then
+            echo "ERROR: Runner release tag (download/vX.Y.Z) not found in $SOURCE_FILE"
+            exit 1
+          fi
+
+          # If the Dockerfile ever has more than one runner download with different tags, stop.
+          COUNT=$(echo "$VERSIONS" | wc -l)
+          if [ "$COUNT" -gt 1 ]; then
+            echo "ERROR: Found different runner tags in $SOURCE_FILE:"
+            echo "$VERSIONS"
+            exit 1
+          fi
+
+          VERSION="$VERSIONS"
+
+          echo "Current runner version (from $SOURCE_FILE): $VERSION"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      # =========================================================
+      # 3. Get GitHub Actions Runner releases
+      # =========================================================
+      - name: Get runner releases
+        id: releases
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # No token is used here. This public endpoint allows 60 requests/hour
+          # per IP address without authentication.
+          echo "Getting GitHub Actions Runner releases..."
+
+          HTTP_STATUS=$(curl -sS \
+            -L \
+            -o releases.json \
+            -w "%{http_code}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/actions/runner/releases?per_page=100")
+
+          echo "GitHub API HTTP Status: $HTTP_STATUS"
+
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "ERROR: Unable to retrieve runner releases."
+
+            if [ "$HTTP_STATUS" = "403" ] || [ "$HTTP_STATUS" = "429" ]; then
+              echo "This is probably GitHub's 60 requests/hour limit for calls without a token."
+              echo "Wait and re-run the workflow later."
+            fi
+
+            cat releases.json
+            exit 1
+          fi
+
+          echo "Runner releases downloaded successfully."
+
+
+      # =========================================================
+      # 4. Find first newer version AND latest version
+      # =========================================================
+      - name: Determine runner versions
+        id: versions
+        shell: bash
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          echo "Current runner version: $CURRENT"
+
+
+          # -----------------------------------------------------
+          # Find LATEST version
+          # -----------------------------------------------------
+          LATEST=$(jq -c '
+            [
+              .[]
+              | select(.draft == false)
+              | select(.prerelease == false)
+              | {
+                  version: (.tag_name | sub("^v"; "")),
+                  published_at: .published_at
+                }
+            ]
+            | sort_by(
+                .version
+                | split(".")
+                | map(tonumber)
+              )
+            | .[-1]
+          ' releases.json)
+
+
+          LATEST_VERSION=$(echo "$LATEST" | jq -r '.version')
+          LATEST_RELEASE_DATE=$(echo "$LATEST" | jq -r '.published_at')
+
+          echo "Latest runner version: $LATEST_VERSION"
+          echo "Latest release date: $LATEST_RELEASE_DATE"
+
+
+          echo "latest_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "latest_release_date=$LATEST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
+
+
+          # -----------------------------------------------------
+          # Find FIRST version newer than current version
+          # -----------------------------------------------------
+          FIRST_NEWER=$(jq -c --arg current "$CURRENT" '
+            [
+              .[]
+              | select(.draft == false)
+              | select(.prerelease == false)
+              | {
+                  version: (.tag_name | sub("^v"; "")),
+                  published_at: .published_at
+                }
+              | select(
+                  (
+                    .version
+                    | split(".")
+                    | map(tonumber)
+                  )
+                  >
+                  (
+                    $current
+                    | split(".")
+                    | map(tonumber)
+                  )
+                )
+            ]
+            | sort_by(
+                .version
+                | split(".")
+                | map(tonumber)
+              )
+            | .[0]
+          ' releases.json)
+
+          if [ "$FIRST_NEWER" = "null" ] || [ -z "$FIRST_NEWER" ]; then
+            echo "No newer runner version found. Runner is up to date."
+
+            echo "available=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+          fi
+
+
+          FIRST_VERSION=$(echo "$FIRST_NEWER" | jq -r '.version')
+          FIRST_RELEASE_DATE=$(echo "$FIRST_NEWER" | jq -r '.published_at')
+
+          echo "First newer version: $FIRST_VERSION"
+          echo "First newer release date: $FIRST_RELEASE_DATE"
+
+
+          # -----------------------------------------------------
+          # Save outputs
+          # -----------------------------------------------------
+          echo "available=true" >> "$GITHUB_OUTPUT"
+
+          echo "first_version=$FIRST_VERSION" >> "$GITHUB_OUTPUT"
+          echo "first_release_date=$FIRST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
+
+
+      # =========================================================
+      # 5. Calculate update age
+      # =========================================================
+      - name: Calculate update age
+        id: age
+        if: steps.versions.outputs.available == 'true'
+        shell: bash
+        env:
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+        run: |
+          set -euo pipefail
+
+          RELEASE_EPOCH=$(date -d "$FIRST_RELEASE_DATE" +%s)
+          NOW_EPOCH=$(date -u +%s)
+
+          AGE_SECONDS=$((NOW_EPOCH - RELEASE_EPOCH))
+
+          if [ "$AGE_SECONDS" -lt 0 ]; then
+            AGE_SECONDS=0
+          fi
+
+          AGE_DAYS=$((AGE_SECONDS / 86400))
+
+          DAYS_REMAINING=$((30 - AGE_DAYS))
+
+          if [ "$DAYS_REMAINING" -lt 0 ]; then
+            DAYS_REMAINING=0
+          fi
+
+          echo "First newer release: $FIRST_RELEASE_DATE"
+          echo "Days since first newer release: $AGE_DAYS"
+          echo "Days remaining: $DAYS_REMAINING"
+
+          echo "days=$AGE_DAYS" >> "$GITHUB_OUTPUT"
+          echo "remaining=$DAYS_REMAINING" >> "$GITHUB_OUTPUT"
+
+
+      # =========================================================
+      # 6. Determine notification level
+      # =========================================================
+      - name: Determine notification level
+        id: notification
+        shell: bash
+        env:
+          AVAILABLE: ${{ steps.versions.outputs.available }}
+          DAYS: ${{ steps.age.outputs.days }}
+        run: |
+          set -euo pipefail
+
+          if [ "$AVAILABLE" != "true" ]; then
+            LEVEL="UP_TO_DATE"
+
+          elif [ "$DAYS" -ge 25 ]; then
+            LEVEL="CRITICAL"
+
+          elif [ "$DAYS" -ge 21 ]; then
+            LEVEL="URGENT"
+
+          elif [ "$DAYS" -ge 14 ]; then
+            LEVEL="WARNING"
+
+          else
+            LEVEL="NONE"
+          fi
+
+          echo "Notification level: $LEVEL"
+
+          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
+
+
+      # =========================================================
+      # 7. Display runner status
+      # =========================================================
+      - name: Display runner status
+        if: always()
+        shell: bash
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+          LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
+          DAYS: ${{ steps.age.outputs.days }}
+          REMAINING: ${{ steps.age.outputs.remaining }}
+          LEVEL: ${{ steps.notification.outputs.level }}
+        run: |
+          echo "=========================================="
+          echo "GitHub Actions Runner Status"
+          echo "=========================================="
+
+          echo "Current Version        : $CURRENT"
+          echo "First Newer Version    : ${FIRST_VERSION:-N/A}"
+          echo "First Release Date     : ${FIRST_RELEASE_DATE:-N/A}"
+          echo "Latest Version         : ${LATEST_VERSION:-N/A}"
+          echo "Latest Release Date    : ${LATEST_RELEASE_DATE:-N/A}"
+          echo "Days Since First Newer : ${DAYS:-N/A}"
+          echo "Days Remaining         : ${REMAINING:-N/A}"
+          echo "Notification Level     : ${LEVEL:-N/A}"
+
+          echo "=========================================="
+
+
+      # =========================================================
+      # 8. Send Teams notification (webhook comes from the
+      #    TEAMS_WEBHOOK_URL repository secret)
+      # =========================================================
+      - name: Send Teams notification
+        shell: bash
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          CURRENT: ${{ steps.current.outputs.version }}
+          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
+          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+          LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+          DAYS: ${{ steps.age.outputs.days }}
+          REMAINING: ${{ steps.age.outputs.remaining }}
+          LEVEL: ${{ steps.notification.outputs.level }}
+        run: |
+          set -euo pipefail
+
+
+          # -----------------------------------------------------
+          # Make sure the secret is available
+          # -----------------------------------------------------
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "ERROR: TEAMS_WEBHOOK_URL secret is empty or not available to this workflow."
+            exit 1
+          fi
+
+
+          # -----------------------------------------------------
+          # Determine Teams title
+          # -----------------------------------------------------
+          if [ "$LEVEL" = "UP_TO_DATE" ]; then
+            TITLE="✅ GitHub Actions Runner Is Up To Date"
+
+          elif [ "$LEVEL" = "NONE" ]; then
+            TITLE="🔔 GitHub Actions Runner Update Available"
+
+          elif [ "$LEVEL" = "WARNING" ]; then
+            TITLE="🟡 GitHub Actions Runner Update Warning"
+
+          elif [ "$LEVEL" = "URGENT" ]; then
+            TITLE="🟠 GitHub Actions Runner Update Urgent"
+
+          else
+            TITLE="🔴 GitHub Actions Runner Update Critical"
+          fi
+
+
+          # -----------------------------------------------------
+          # Message text depends on whether an update exists
+          # -----------------------------------------------------
+          if [ "$LEVEL" = "UP_TO_DATE" ]; then
+            SUMMARY="The runner Docker image is on the latest GitHub Actions Runner version."
+            ACTION="No action needed."
+          else
+            SUMMARY="A newer GitHub Actions Runner software version is available."
+            ACTION="Please update the runner Docker image."
+          fi
+
+          # Fields that don't apply when up to date show N/A
+          FIRST_VERSION="${FIRST_VERSION:-N/A}"
+          FIRST_RELEASE_DATE="${FIRST_RELEASE_DATE:-N/A}"
+          DAYS="${DAYS:-N/A}"
+          REMAINING="${REMAINING:-N/A}"
+
+
+          # -----------------------------------------------------
+          # Create Adaptive Card
+          # -----------------------------------------------------
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            --arg current "$CURRENT" \
+            --arg first "$FIRST_VERSION" \
+            --arg first_date "$FIRST_RELEASE_DATE" \
+            --arg latest "$LATEST_VERSION" \
+            --arg days "$DAYS" \
+            --arg remaining "$REMAINING" \
+            --arg level "$LEVEL" \
+            --arg summary "$SUMMARY" \
+            --arg action "$ACTION" \
+            '{
+              type: "message",
+              attachments: [
+                {
+                  contentType: "application/vnd.microsoft.card.adaptive",
+                  contentUrl: null,
+                  content: {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    type: "AdaptiveCard",
+                    version: "1.2",
+
+                    body: [
+
+                      {
+                        type: "TextBlock",
+                        text: $title,
+                        weight: "Bolder",
+                        size: "Medium",
+                        wrap: true
+                      },
+
+                      {
+                        type: "TextBlock",
+                        text: $summary,
+                        wrap: true
+                      },
+
+                      {
+                        type: "FactSet",
+                        facts: [
+
+                          {
+                            title: "Current Version:",
+                            value: $current
+                          },
+
+                          {
+                            title: "Latest Version:",
+                            value: $latest
+                          },
+
+                          {
+                            title: "First Newer Version:",
+                            value: $first
+                          },
+
+                          {
+                            title: "First Release Date:",
+                            value: $first_date
+                          },
+
+                          {
+                            title: "Days Since Release:",
+                            value: $days
+                          },
+
+                          {
+                            title: "Approx. Days Remaining:",
+                            value: $remaining
+                          },
+
+                          {
+                            title: "Severity:",
+                            value: $level
+                          }
+
+                        ]
+                      },
+
+                      {
+                        type: "TextBlock",
+                        text: $action,
+                        wrap: true,
+                        weight: "Bolder"
+                      }
+
+                    ]
+                  }
+                }
+              ]
+            }')
+
+
+          # -----------------------------------------------------
+          # Send notification to Teams
+          # -----------------------------------------------------
+          echo "Sending Teams notification..."
+
+          HTTP_STATUS=$(curl -sS \
+            -o teams-response.txt \
+            -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$TEAMS_WEBHOOK_URL")
+
+
+          echo "Teams HTTP Status: $HTTP_STATUS"
+
+
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "ERROR: Teams notification failed."
+
+            cat teams-response.txt
+
+            exit 1
+          fi
+
+
+          echo "Teams notification sent successfully."
