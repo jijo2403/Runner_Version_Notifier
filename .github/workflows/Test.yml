@@ -18,13 +18,13 @@ jobs:
 
       # =========================================================
       # 2. Get current runner version from the release tag in
-      #    DockerLinux/Dockerfile
+      #    Dockerfile (repo root)
       # =========================================================
       - name: Get current runner version
         id: current
         shell: bash
         env:
-          SOURCE_FILE: DockerLinux/Dockerfile
+          SOURCE_FILE: Dockerfile
         run: |
           set -euo pipefail
 
@@ -253,9 +253,6 @@ jobs:
           if [ "$AVAILABLE" != "true" ]; then
             LEVEL="UP_TO_DATE"
 
-          elif [ "$DAYS" -ge 30 ]; then
-            LEVEL="CRITICAL"
-
           elif [ "$DAYS" -ge 25 ]; then
             LEVEL="CRITICAL"
 
@@ -307,7 +304,8 @@ jobs:
 
 
       # =========================================================
-      # 8. Send Teams notification
+      # 8. Send Teams notification (webhook comes from the
+      #    TEAMS_WEBHOOK_URL repository secret)
       # =========================================================
       - name: Send Teams notification
         shell: bash
@@ -322,6 +320,15 @@ jobs:
           LEVEL: ${{ steps.notification.outputs.level }}
         run: |
           set -euo pipefail
+
+
+          # -----------------------------------------------------
+          # Make sure the secret is available
+          # -----------------------------------------------------
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "ERROR: TEAMS_WEBHOOK_URL secret is empty or not available to this workflow."
+            exit 1
+          fi
 
 
           # -----------------------------------------------------
