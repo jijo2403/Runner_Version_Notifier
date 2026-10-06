@@ -30,7 +30,7 @@ RUN wget https://github.com/mikefarah/yq/releases/download/v4.52.2/yq_linux_amd6
 
 # Install GitHub Actions runner and necessary hooks
 WORKDIR /actions-runner
-RUN curl -O -L https://github.com/actions/runner/releases/download/v2.336.0/actions-runner-linux-x64-2.336.0.tar.gz \
+RUN curl -O -L https://github.com/actions/runner/releases/download/v2.337.0/actions-runner-linux-x64-2.336.0.tar.gz \
     && tar xzf actions-runner-linux-x64-2.336.0.tar.gz \
     && rm actions-runner-linux-x64-2.336.0.tar.gz
 
