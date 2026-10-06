@@ -96,9 +96,9 @@ jobs:
 
 
       # =========================================================
-      # 4. Find first newer version AND latest version
+      # 4. Find LATEST version and check if it is newer than current
       # =========================================================
-      - name: Determine runner versions
+      - name: Determine latest runner version
         id: versions
         shell: bash
         env:
@@ -108,10 +108,6 @@ jobs:
 
           echo "Current runner version: $CURRENT"
 
-
-          # -----------------------------------------------------
-          # Find LATEST version
-          # -----------------------------------------------------
           LATEST=$(jq -c '
             [
               .[]
@@ -130,90 +126,40 @@ jobs:
             | .[-1]
           ' releases.json)
 
-
           LATEST_VERSION=$(echo "$LATEST" | jq -r '.version')
           LATEST_RELEASE_DATE=$(echo "$LATEST" | jq -r '.published_at')
 
           echo "Latest runner version: $LATEST_VERSION"
           echo "Latest release date: $LATEST_RELEASE_DATE"
 
-
           echo "latest_version=$LATEST_VERSION" >> "$GITHUB_OUTPUT"
           echo "latest_release_date=$LATEST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
 
+          # Is the latest version newer than the current one?
+          HIGHEST=$(printf '%s\n%s\n' "$CURRENT" "$LATEST_VERSION" | sort -V | tail -n 1)
 
-          # -----------------------------------------------------
-          # Find FIRST version newer than current version
-          # -----------------------------------------------------
-          FIRST_NEWER=$(jq -c --arg current "$CURRENT" '
-            [
-              .[]
-              | select(.draft == false)
-              | select(.prerelease == false)
-              | {
-                  version: (.tag_name | sub("^v"; "")),
-                  published_at: .published_at
-                }
-              | select(
-                  (
-                    .version
-                    | split(".")
-                    | map(tonumber)
-                  )
-                  >
-                  (
-                    $current
-                    | split(".")
-                    | map(tonumber)
-                  )
-                )
-            ]
-            | sort_by(
-                .version
-                | split(".")
-                | map(tonumber)
-              )
-            | .[0]
-          ' releases.json)
-
-          if [ "$FIRST_NEWER" = "null" ] || [ -z "$FIRST_NEWER" ]; then
+          if [ "$LATEST_VERSION" != "$CURRENT" ] && [ "$HIGHEST" = "$LATEST_VERSION" ]; then
+            echo "A newer runner version is available."
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
             echo "No newer runner version found. Runner is up to date."
-
             echo "available=false" >> "$GITHUB_OUTPUT"
-
-            exit 0
           fi
 
 
-          FIRST_VERSION=$(echo "$FIRST_NEWER" | jq -r '.version')
-          FIRST_RELEASE_DATE=$(echo "$FIRST_NEWER" | jq -r '.published_at')
-
-          echo "First newer version: $FIRST_VERSION"
-          echo "First newer release date: $FIRST_RELEASE_DATE"
-
-
-          # -----------------------------------------------------
-          # Save outputs
-          # -----------------------------------------------------
-          echo "available=true" >> "$GITHUB_OUTPUT"
-
-          echo "first_version=$FIRST_VERSION" >> "$GITHUB_OUTPUT"
-          echo "first_release_date=$FIRST_RELEASE_DATE" >> "$GITHUB_OUTPUT"
-
-
       # =========================================================
-      # 5. Calculate update age
+      # 5. Calculate update age (from the LATEST version release)
       # =========================================================
       - name: Calculate update age
         id: age
         if: steps.versions.outputs.available == 'true'
         shell: bash
         env:
-          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
+          LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
         run: |
           set -euo pipefail
 
-          RELEASE_EPOCH=$(date -d "$FIRST_RELEASE_DATE" +%s)
+          RELEASE_EPOCH=$(date -d "$LATEST_RELEASE_DATE" +%s)
           NOW_EPOCH=$(date -u +%s)
 
           AGE_SECONDS=$((NOW_EPOCH - RELEASE_EPOCH))
@@ -230,8 +176,8 @@ jobs:
             DAYS_REMAINING=0
           fi
 
-          echo "First newer release: $FIRST_RELEASE_DATE"
-          echo "Days since first newer release: $AGE_DAYS"
+          echo "Latest release: $LATEST_RELEASE_DATE"
+          echo "Days since latest release: $AGE_DAYS"
           echo "Days remaining: $DAYS_REMAINING"
 
           echo "days=$AGE_DAYS" >> "$GITHUB_OUTPUT"
@@ -279,8 +225,6 @@ jobs:
         shell: bash
         env:
           CURRENT: ${{ steps.current.outputs.version }}
-          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
-          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
           LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
           LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
           DAYS: ${{ steps.age.outputs.days }}
@@ -292,11 +236,9 @@ jobs:
           echo "=========================================="
 
           echo "Current Version        : $CURRENT"
-          echo "First Newer Version    : ${FIRST_VERSION:-N/A}"
-          echo "First Release Date     : ${FIRST_RELEASE_DATE:-N/A}"
           echo "Latest Version         : ${LATEST_VERSION:-N/A}"
           echo "Latest Release Date    : ${LATEST_RELEASE_DATE:-N/A}"
-          echo "Days Since First Newer : ${DAYS:-N/A}"
+          echo "Days Since Release     : ${DAYS:-N/A}"
           echo "Days Remaining         : ${REMAINING:-N/A}"
           echo "Notification Level     : ${LEVEL:-N/A}"
 
@@ -312,9 +254,8 @@ jobs:
         env:
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           CURRENT: ${{ steps.current.outputs.version }}
-          FIRST_VERSION: ${{ steps.versions.outputs.first_version }}
-          FIRST_RELEASE_DATE: ${{ steps.versions.outputs.first_release_date }}
           LATEST_VERSION: ${{ steps.versions.outputs.latest_version }}
+          LATEST_RELEASE_DATE: ${{ steps.versions.outputs.latest_release_date }}
           DAYS: ${{ steps.age.outputs.days }}
           REMAINING: ${{ steps.age.outputs.remaining }}
           LEVEL: ${{ steps.notification.outputs.level }}
@@ -362,9 +303,14 @@ jobs:
             ACTION="Please update the runner Docker image."
           fi
 
+          # Readable release date (UTC)
+          if [ -n "${LATEST_RELEASE_DATE:-}" ]; then
+            LATEST_RELEASE_DATE=$(date -u -d "$LATEST_RELEASE_DATE" +"%Y-%m-%d %H:%M:%S UTC")
+          else
+            LATEST_RELEASE_DATE="N/A"
+          fi
+
           # Fields that don't apply when up to date show N/A
-          FIRST_VERSION="${FIRST_VERSION:-N/A}"
-          FIRST_RELEASE_DATE="${FIRST_RELEASE_DATE:-N/A}"
           DAYS="${DAYS:-N/A}"
           REMAINING="${REMAINING:-N/A}"
 
@@ -375,9 +321,8 @@ jobs:
           PAYLOAD=$(jq -n \
             --arg title "$TITLE" \
             --arg current "$CURRENT" \
-            --arg first "$FIRST_VERSION" \
-            --arg first_date "$FIRST_RELEASE_DATE" \
             --arg latest "$LATEST_VERSION" \
+            --arg latest_date "$LATEST_RELEASE_DATE" \
             --arg days "$DAYS" \
             --arg remaining "$REMAINING" \
             --arg level "$LEVEL" \
@@ -425,13 +370,8 @@ jobs:
                           },
 
                           {
-                            title: "First Newer Version:",
-                            value: $first
-                          },
-
-                          {
-                            title: "First Release Date:",
-                            value: $first_date
+                            title: "Latest Release Date:",
+                            value: $latest_date
                           },
 
                           {
